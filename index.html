@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=0, minimal-ui">
+
+    <title>NEAR Offchain Authentication</title>
+    <link rel="shortcut icon" href="data:;base64,iVBORw0KGgo=">
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tweetnacl/1.0.3/nacl-fast.min.js" crossorigin="anonymous"></script>
+
+    <script src="https://cdn.jsdelivr.net/npm/near-api-js@0.39.0/dist/near-api-js.min.js"></script>
+
+    <script src="https://unpkg.com/htm@2.2.1/dist/htm.js" crossorigin="anonymous"></script>
+    <script src="https://unpkg.com/deepmerge@4.2.2/dist/umd.js" crossorigin="anonymous"></script>
+    <script src="https://unpkg.com/react@17.0.1/umd/react.production.min.js" crossorigin="anonymous"></script>
+    <script src="https://unpkg.com/react-dom@17.0.1/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
+    <style>
+        input {
+            min-width: 360px;
+        }
+    </style>
+</head>
+
+<body style="background: #eff3f4;">
+    <script type="module">
+        const CONTRACT_NAME = "sputnikdao.near"
+
+        const { createElement, useState, useEffect, useRef } = React;
+        const html = htm.bind(createElement);
+
+        //------------------------
+        //  SETUP NEAR CONNECTION
+        //------------------------
+        var nearConfig = {
+          networkId: 'mainnet',
+          contractName: CONTRACT_NAME,
+          nodeUrl: 'https://rpc.mainnet.near.org',
+          walletUrl: 'https://wallet.near.org',
+          helperUrl: 'https://helper.mainnet.near.org',
+          explorerUrl: 'https://explorer.near.org',
+        };
+        const nearlib = window.nearApi;
+        window.provider = new nearlib.providers.JsonRpcProvider(nearConfig.nodeUrl);
+        window.near = await nearlib.connect({
+            deps: { keyStore: new nearlib.keyStores.BrowserLocalStorageKeyStore() },
+            ...nearConfig
+        });
+        const walletConnection = new nearlib.WalletConnection(window.near);
+        window.walletConnection = walletConnection;
+
+        const near_account_id = walletConnection.getAccountId();
+
+        //------------------------
+        //  PUBLIC FUNCTIONS
+        //------------------------
+        function set(state, set_state, obj) {
+            set_state(window.deepmerge(state, obj))
+        }
+
+        function toggle_net(state, set_state, obj) {
+            if (state.auth_type == "mainnet")
+                return set_state(window.deepmerge(state, {auth_type: "none"}))
+            set_state(window.deepmerge(state, {auth_type: "mainnet"}))
+        }
+
+        function generate_random_keypair_helper(state, set_state) {
+            const [public_key_b58, secret_key_b58] = generate_random_keypair()
+            const [token, token_58] = generate_api_key(state.account_id||"", public_key_b58, secret_key_b58)
+            const obj = {
+                public_key_b58: public_key_b58,
+                secret_key_b58: secret_key_b58,
+                token: token,
+                token_58: token_58
+            }
+            set(state, set_state, obj)
+        }
+
+        function generate_random_keypair() {
+            var sign_keypair = nacl.sign.keyPair();
+            const public_key_b58 = window.nearApi.utils.serialize.base_encode(sign_keypair.publicKey)
+            const secret_key_b58 = window.nearApi.utils.serialize.base_encode(sign_keypair.secretKey)
+            return [public_key_b58, secret_key_b58]
+        }
+
+        function generate_api_key(accountId, public_key_b58, secret_key_b58) {
+            const secretKey = window.nearApi.utils.serialize.base_decode(secret_key_b58)
+            var epoch = Math.floor(Date.now()/1000)
+            var json = JSON.stringify({provider: "near", account: accountId, public_key_b58: public_key_b58, epoch: epoch})
+
+            var message = (new TextEncoder()).encode(json)
+            var signature = nacl.sign.detached(message, secretKey)
+            signature = window.nearApi.utils.serialize.base_encode(signature)
+
+            const token = json+"."+signature
+            const token_binary = (new TextEncoder()).encode(token)
+            const token_b58 = window.nearApi.utils.serialize.base_encode(token_binary);
+            return [token, token_b58]
+        }
+
+        function signin_near(contract) {
+            window.walletConnection.requestSignIn(
+              contract,
+              contract,
+              window.location.href
+            );
+        }
+
+        function signout_near() {
+            window.walletConnection.signOut();
+            window.location.href = "/";
+        }
+
+        async function api_dummy_request(state, set_state, token) {
+            var response;
+            if (token) {
+                response = await fetch("http://localhost:8080/api", {headers: {"Authorization": token}});
+            } else {
+                response = await fetch("http://localhost:8080/api");
+            }
+            const text = await response.text();
+            set(state, set_state, {fetch_result: text})
+        }
+
+        async function api_dummy_request_invalid_signature(state, set_state, invalid_token) {
+            const response = await fetch("http://localhost:8080/api", {headers: {"Authorization": invalid_token}});
+            const text = await response.text();
+            set(state, set_state, {fetch_result: text})
+        }
+
+        //------------------------
+        //  PRIVATE FUNCTIONS
+        //------------------------
+        function _get_keypair_from_localstorage() {
+            var secret_key = localStorage.getItem(`near-api-js:keystore:${near_account_id}:mainnet`);
+            secret_key = secret_key.replace("ed25519:", "");
+            const secret_key_binary = window.nearApi.utils.serialize.base_decode(secret_key);
+            const sign_keypair = nacl.sign.keyPair.fromSecretKey(secret_key_binary);
+            return sign_keypair;
+        }
+
+        function _get_keypair_from_localstorage_b58() {
+            const sign_keypair = _get_keypair_from_localstorage();
+            const public_key_b58 = window.nearApi.utils.serialize.base_encode(sign_keypair.publicKey)
+            const secret_key_b58 = window.nearApi.utils.serialize.base_encode(sign_keypair.secretKey)
+            return [public_key_b58, secret_key_b58];
+        }
+
+        function _generate_api_key_invalid(accountId, public_key_b58, secret_key_b58) {
+            const secretKey = window.nearApi.utils.serialize.base_decode(secret_key_b58)
+            var epoch = Math.floor(Date.now()/1000)
+            var json = JSON.stringify({provider: "near", account: accountId, public_key_b58: public_key_b58, epoch: epoch})
+
+            var message = (new TextEncoder()).encode(json)
+            var signature = nacl.sign.detached(message, secretKey)
+            signature[signature.length-1] = 0;
+            signature = window.nearApi.utils.serialize.base_encode(signature)
+
+            const token = json+"."+signature
+            const token_binary = (new TextEncoder()).encode(token)
+            const token_b58 = window.nearApi.utils.serialize.base_encode(token_binary);
+            return [token, token_b58]
+        }
+
+        //------------------------
+        //  REACT VIEWS
+        //------------------------
+        function Index() {
+            const [state, set_state] = useState({});
+            var content = html`<${IndexNoAccount} state=${state} set_state=${set_state}/>`
+            if (state.auth_type == "mainnet")
+                content = html`<${IndexNearAccount} state=${state} set_state=${set_state}/>`
+            return content;
+        }
+
+        function IndexNoAccount({state, set_state}) {
+            return html`
+            <input key="input_account" type="text" defaultValue=${state.account_id} onBlur=${(e)=> set(state, set_state, {account_id: e.target.value})}></input>
+            <input key="input_publickey" type="text" defaultValue=${state.public_key_b58} disabled></input>
+            <input key="input_secretkey" type="text" defaultValue=${state.secret_key_b58} disabled></input>
+            <button onClick=${()=> generate_random_keypair_helper(state, set_state)}>Generate psuedo token</button>
+            <button onClick=${()=> toggle_net(state, set_state)}>M</button>
+            <br/>
+            <textarea rows="8" cols="130" key="input_token" type="text" defaultValue=${state.token} disabled></input>
+            <br/>
+            <textarea rows="8" cols="130" key="input_token_58" type="text" defaultValue=${state.token_58} disabled></input>
+            `
+        }
+
+        function IndexNearAccount({state, set_state}) {
+            if (!near_account_id)
+                return html`<button onClick=${()=> signin_near('sputnikdao.near')}>Sign In to sputnikdao</button>`
+
+            const [public_key_b58, secret_key_b58] = _get_keypair_from_localstorage_b58();
+            const [token, token_b58] = generate_api_key(near_account_id, public_key_b58, secret_key_b58)
+            const [token_invalid, token_b58_invalid] = _generate_api_key_invalid(near_account_id, public_key_b58, secret_key_b58)
+            return html`
+            <button onClick=${()=> signout_near()}>Sign Out</button>
+            <br/>
+            <textarea rows="3" cols="90" key="input_token" type="text" defaultValue=${public_key_b58} disabled></input>
+            <br/>
+            <textarea rows="3" cols="90" key="input_token" type="text" defaultValue=${secret_key_b58} disabled></input>
+            <br/>
+            <textarea rows="8" cols="130" key="input_token" type="text" defaultValue=${token} disabled></input>
+            <br/>
+            <textarea rows="8" cols="130" key="input_token" type="text" defaultValue=${token_b58} disabled></input>
+            <br/>
+            <button onClick=${()=> api_dummy_request(state, set_state, token_b58)}>Offchain Request</button>
+            <button onClick=${()=> api_dummy_request_invalid_signature(state, set_state, token_b58_invalid)}>Offchain Request Invalid Signature</button>
+            <br/>
+            <textarea rows="8" cols="130" key="fetch_result" type="text" defaultValue=${state.fetch_result} disabled></input>
+            `
+        }
+
+        ReactDOM.render(html`<${Index}/>`, document.getElementById("App"));
+
+
+        //------------------------
+        //  TESTS
+        //------------------------
+        function test_nacl() {
+            test_nacl_sign_verify();
+        }
+
+        function test_nacl_sign_verify() {
+            const [public_key_b58, secret_key_b58] = generate_random_keypair()
+
+            const public_key_binary = window.nearApi.utils.serialize.base_decode(public_key_b58)
+            const secret_key_binary = window.nearApi.utils.serialize.base_decode(secret_key_b58)
+
+            var text = "sign me!"
+            var message = (new TextEncoder()).encode(text)
+            var signature_binary = nacl.sign.detached(message, secret_key_binary)
+            const is_valid = nacl.sign.detached.verify(message, signature_binary, public_key_binary)
+            console.assert(is_valid == true, "signature is not valid")
+        }
+
+        window.test_nacl = test_nacl;
+
+    </script>
+
+    <div id="App"></div>
+</body>
+</html>
